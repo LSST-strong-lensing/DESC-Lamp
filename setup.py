@@ -20,7 +20,7 @@ setuptools.setup(
         "License :: BSD 3-Clause License",
         "Operating System :: OS Independent",
     ],
-    package_dir={"": "desclamp"},
-    packages=setuptools.find_packages(where="desclamp"),
+    package_dir={"": "./"},
+    packages=setuptools.find_packages(where="./"),
     python_requires=">=3.6",
 )
