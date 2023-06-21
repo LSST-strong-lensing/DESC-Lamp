@@ -5,6 +5,7 @@ import pandas as pd
 import copy
 # We will use astropy's WCS and ZScaleInterval for plotting
 from astropy.wcs import WCS
+from astropy.io import fits
 # Also to convert sky coordinates
 
 import galsim
@@ -15,12 +16,18 @@ import lsst.afw.display.rgb as rgb
 from lsst.pipe.tasks.insertFakes import _add_fake_sources
 
 # And also DESC packages to get the data path
-import GCRCatalogs
-from GCRCatalogs import GCRQuery
-import desc_dc2_dm_data
+#import GCRCatalogs
+#from GCRCatalogs import GCRQuery
+#import desc_dc2_dm_data
+import lsst.daf.butler as dafButler
+import lsst.geom
+import lsst.afw.display as afwDisplay
 
 
-def catalog_setup(dc2_data_version):
+from lsst.rsp import get_tap_service, retrieve_query
+
+#def catalog_setup(dc2_data_version):
+def catalog_setup(config,collection='2.2i/runs/DP0.2'):
         """ This function fetches catalogs and sets up a butler.
         
         Parameters
@@ -29,13 +36,17 @@ def catalog_setup(dc2_data_version):
             data version of the catalog. This is used to instantiate the butler.
         """
         # Fetch GCR catalogs
-        GCRCatalogs.get_available_catalogs(names_only=True, name_contains=dc2_data_version)
-        cat = GCRCatalogs.load_catalog("dc2_object_run"+dc2_data_version)
-        
+        #GCRCatalogs.get_available_catalogs(names_only=True, name_contains=dc2_data_version)
+        #cat = GCRCatalogs.load_catalog("dc2_object_run"+dc2_data_version)
+        service = get_tap_service()
+        assert service is not None
+        assert service.baseurl == "https://data.lsst.cloud/api/tap" 
         # Sets up butler
-        butler = desc_dc2_dm_data.get_butler(dc2_data_version)
         
-        return cat, butler
+        #butler = desc_dc2_dm_data.get_butler(dc2_data_version)
+        butler = dafButler.Butler(config, collections=collection)
+        
+        return service, butler
     
 class Cutout:
     """A class that describes cutout of lens candidates and all the catalog level 
@@ -65,9 +76,9 @@ class Cutout:
 class Candidates:
     """ Class that handles catalog querries. Fetches postage stamps and light curves of samples of images and allows visualization """
     
-    def __init__(self, dc2_data_version, skymap='deepCoadd_skyMap'):
+    def __init__(self, config, collection='2.2i/runs/DP0.2',skymap="skyMap"):
         
-        self.cat, self.butler = catalog_setup(dc2_data_version)
+        self.service, self.butler = catalog_setup(config,collection)
         self.skymap = self.butler.get(skymap)
         
         
@@ -89,21 +100,24 @@ class Candidates:
             columns_to_get += columns
             columns_to_get = np.unique(columns_to_get)
             
-        assert self.cat.has_quantities(columns_to_get)
+        #assert self.cat.has_quantities(columns_to_get)
         
         # Submit the query and get catalog of objects
         if tracts is not None:
             filters = f"(tract == {tracts[0]})"
             for t in tracts[1:]:
                 filters +=  f" | (tract == {t})"
-        objects = self.cat.get_quantities(columns_to_get, filters=GCRQuery(*query), native_filters=filters)
-        
+                
+        #objects = self.cat.get_quantities(columns_to_get, filters=GCRQuery(*query), native_filters=filters)
+        objects = self.service.search(query)
         # make it a pandas data frame for the ease of manipulation.
         # Objects are nont made attributes of the class in case the user wants postage stamps for a smaller set of objects
         objects = pd.DataFrame(objects)
+        objects = objects[columns_to_get]
+        
         return objects
 
-    def make_postage_stamps(self, objects, cutout_size=100, bands = 'irg'):
+    def make_postage_stamps(self, objects, cutout_size=100, bands = 'irg',save_cutout=False):
         """ Extracts a coadd postage stamp of an object from the catalog
         
         Parameters
@@ -119,22 +133,32 @@ class Candidates:
         
         cutout_extent = lsst.geom.ExtentI(cutout_size, cutout_size)
         cutouts = []
+
         for (_, object_this) in objects.iterrows():
             radec = lsst.geom.SpherePoint(object_this["ra"], object_this["dec"], lsst.geom.degrees)
 
             center = self.skymap.findTract(radec).getWcs().skyToPixel(radec)
             bbox = lsst.geom.BoxI(lsst.geom.Point2I((center.x - cutout_size*0.5, center.y - cutout_size*0.5)), cutout_extent)
         
-            exposure = [self.butler.get("deepCoadd_sub", 
-                              bbox=bbox, 
-                              tract=object_this["tract"], 
-                              patch=object_this["patch"], 
-                              filter=band
+            exposure = [self.butler.get("deepCoadd", 
+                              parameters={'bbox':bbox}, 
+                              dataId={'tract':object_this["tract"], 
+                              'patch':object_this["patch"], 
+                              'band':band}
                              ) for band in bands]
-            
+           # if save_cutout:
+            #    for i,band in enumerate(bands):
+            #        print(i)
+            #        psf = exposure[i].getPsf()
+            #        kernel_image = psf.computeImage(center)
+            #        hdu = fits.PrimaryHDU(kernel_image.array)
+            #                    hdulist = fits.HDUList([hdu])
+            #        hdulist.writeto("{:x}_{}_psf.fits".format(int(object_this['objectId']),band))
+            #        hdulist.close()
+                    
             new_cutout = Cutout(exposure, object_this)
             cutouts.append(new_cutout) 
-        
+            
         return cutouts
     
     def display_cutouts(self, cutouts, cutout_size=100, data_range = 2, q = 8):
@@ -154,7 +178,10 @@ class Candidates:
             cutout = cutouts[i]
             image = cutout.exposure
             image_rgb = rgb.makeRGB(*image, dataRange = data_range, Q=q)
-    
+            #hdu = fits.PrimaryHDU(image_rgb)
+            #hdulist = fits.HDUList([hdu])
+            #hdulist.writeto("test.fits")
+            #hdulist.close()
             ax = plt.subplot(gs[i], 
                              projection=WCS(cutout.exposure[0].getWcs().getFitsMetadata()), 
                              label=str(cutout.catalog["objectId"])
